@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "lib/*",
+    "bin/*", 
+]
+resolver = "2"
