@@ -1,7 +1,7 @@
 #[allow(dead_code)]
 pub mod nscripter_archive {
     use core::panic;
-    use std::{default, fs::File, io::{ErrorKind, Read, SeekFrom}, os::windows::fs::FileExt};
+    use std::{collections::HashMap, fs::File, io::{ErrorKind, Read, SeekFrom}};
 
     struct FileHelper {
         file : File,
@@ -65,14 +65,39 @@ pub mod nscripter_archive {
 
             return res.to_string();
         }
+
+        fn seek(&mut self, seek : SeekFrom) {
+            use std::io::Seek;
+            self.file.seek(seek).unwrap();
+        }
+
+        fn read_slice(&mut self, offset : usize, size : usize) -> Vec<u8> {
+            use std::io::Seek;
+
+            let mut buffer : Vec<u8> = Vec::new();
+            self.file.seek(SeekFrom::Start(offset as u64)).unwrap();
+            buffer = vec![0; size];
+            self.file.read(&mut buffer).unwrap();
+
+            return buffer;
+        }
+
+        fn read_slice_through_keytable(&mut self, offset : usize, size : usize) -> Vec<u8> {
+            let mut output = self.read_slice(offset, size);
+            for byte in &mut output {
+                *byte = self.key_table[*byte as usize];
+            }
+
+            return output;
+        }
     }
 
     #[derive(Clone, Copy, Debug)] 
     pub enum Compression {
         None = 0,
-        Spb = 1,
-        Lzss = 2,
-        Nbz = 4, // Seems to just be Bzip2
+        Spb = 1, 
+        Lzss = 2, // Lempel–Ziv–Storer–Szymanski Compression
+        Nbz = 4, // Bzip2 Compression
     }
 
     pub enum ArchiveType {
@@ -109,6 +134,7 @@ pub mod nscripter_archive {
 
     pub struct ArchiveIndex {
         pub entries : Vec<ArchiveEntry>,
+        pub entries_map : HashMap<String, usize>,
         pub offset : usize
     }
 
@@ -116,6 +142,95 @@ pub mod nscripter_archive {
         file : FileHelper,
         pub index : ArchiveIndex,
         pub archive_type : ArchiveType,
+    }
+
+    // This has got to be the worst part of this project by far. A seemingly completely heretofore undocumented image
+    // compression format that exists only within the sources of ONScripter and it's many forks.
+    fn parse_spb_into_bmp(file : &mut FileHelper, offset : usize, size : usize) -> Vec<u8> {
+        file.seek(SeekFrom::Start(offset as u64));
+        let width = file.read_u16_be() as usize;
+        let height = file.read_u16_be() as usize;
+        
+        let width_pad : usize = (4 - width * 3 % 4) % 4;
+        let total_size : usize = (width * 3 + width_pad) * height + 54;
+
+
+        let buffer = file.read_slice_through_keytable(offset + 4, size - 4);
+        
+        use bitbuffer::{BitReadBuffer, BitReadStream, BigEndian};
+        let buffer = BitReadBuffer::new(&buffer, BigEndian);
+        let mut stream = BitReadStream::new(buffer);
+
+        let mut bmp_file = bmp_rust::bmp::BMP::new(height as i32, width as u32, None);
+
+        let mut pixel_buffer : Vec<[u8;4]> = vec![[255; 4]; width * height];
+        let mut decompression_buffer : Vec<u8> = vec![0; (width * height) + 4];
+
+        for channel in (0..3).rev() {
+            let mut c : i32 = (stream.read_int::<u8>(8).unwrap()) as i32;
+            let mut i : usize = 0;
+            decompression_buffer[i] = c as u8;
+            i += 1;
+
+            while i < (width * height) {
+                let n : i32 = (stream.read_int::<u8>(3).unwrap()) as i32;
+                let m : i32;
+
+                if n == 0 {
+                    decompression_buffer[i + 0] = c as u8;
+                    decompression_buffer[i + 1] = c as u8;
+                    decompression_buffer[i + 2] = c as u8;
+                    decompression_buffer[i + 3] = c as u8;
+                    i += 4;
+                    
+                    continue;
+                } else if n == 7 {
+                    m = (stream.read_int::<u8>(1).unwrap()) as i32 + 1;
+                } else {
+                    m = n + 2;
+                }
+                
+
+                for _ in 0..4 {
+                    if m == 8 {
+                        c = (stream.read_int::<u8>(8).unwrap()) as i32;
+                    } else {
+                        let k : i32 = (stream.read_int::<u8>(m as usize).unwrap()) as i32;
+                        if (k & 1) > 0 {
+                            c += (k >> 1) + 1;
+                        } else {
+                            c -= k >> 1;
+                        }
+                    }
+                    decompression_buffer[i] = c as u8;
+                    i += 1;
+                }
+            }
+
+            for y in 0..height {
+                let row_skip = y * width;
+                if (y & 1) == 1 {
+                    for x in 0..width {
+                        let index = x + row_skip;
+                        let decompression_index = ((width - 1) - x ) + row_skip;
+                        pixel_buffer[index][channel] = decompression_buffer[decompression_index];
+                    }
+                } else {
+                    for x in 0..width {
+                        let index = x + row_skip;
+                        pixel_buffer[index][channel] = decompression_buffer[index];
+                    }
+                }
+            }
+        }
+
+        for y in 0..height {
+            for x in 0..width {
+                bmp_file.change_color_of_pixel(x as u16, y as u16, pixel_buffer[x + (y * width)]).expect("Failed to change color of pixel");
+            }
+        }
+
+        return bmp_file.contents;
     }
 
     impl ArchiveReader {
@@ -152,7 +267,7 @@ pub mod nscripter_archive {
 
                 let offset = file.read_u32_be() as usize + file_offset;
                 let size = file.read_u32_be() as usize;
-                let mut decompressed_size : Option<usize> = None;
+                let mut decompressed_size : Option<usize>;
 
                 if matches!(archive_type, ArchiveType::SAR) {
                     decompressed_size = Some(size);
@@ -172,16 +287,22 @@ pub mod nscripter_archive {
                 });
             }
 
-            return ArchiveIndex{ entries, offset : file_offset };
+            let mut entries_map : HashMap<String, usize> = HashMap::new();
+            for (i, entry) in entries.iter().enumerate() {
+                entries_map.insert(entry.name.clone(), i);
+            }
+
+            return ArchiveIndex{ entries, entries_map, offset : file_offset };
         }
         
-        fn parse_ns2_header(file : &mut FileHelper, offset : u32) -> ArchiveIndex {
-            let mut entries : Vec<ArchiveEntry> = Vec::new();
-            return ArchiveIndex{ entries, offset : 0 };
+        fn parse_ns2_header(_file : &mut FileHelper, _offset : u32) -> ArchiveIndex {
+            let entries : Vec<ArchiveEntry> = Vec::new();
+            let entries_map : HashMap<String, usize> = HashMap::new();
+            return ArchiveIndex{ entries, entries_map, offset : 0 };
         }
 
         fn parse_header(file : &mut FileHelper, archive_type : &ArchiveType, offset : u32) -> ArchiveIndex {
-            match (archive_type) {
+            match archive_type {
                 ArchiveType::SAR => return Self::parse_sar_or_nsa_header(file, archive_type, offset),
                 ArchiveType::NSA => return Self::parse_sar_or_nsa_header(file, archive_type, offset),
                 ArchiveType::NS2 => return Self::parse_ns2_header(file, offset)
@@ -207,23 +328,41 @@ pub mod nscripter_archive {
             }
         }
 
+        
+
+
+
         pub fn extract(&mut self, info : ArchiveEntryInfo) -> Vec<u8> {
-            let mut buffer : Vec<u8> = Vec::new();
-            
-            use std::io::Seek;
-            self.file.file.seek(SeekFrom::Start(info.offset as u64)).unwrap();
-            buffer = vec![0; info.size];
-            self.file.file.read(&mut buffer).unwrap();
+            let mut buffer : Vec<u8>;
 
             if matches!(info.compression, Compression::None) {
+                buffer = self.file.read_slice_through_keytable(info.offset, info.size);
+            } else if matches!(info.compression, Compression::Spb) {
+                buffer = parse_spb_into_bmp(&mut self.file, info.offset, info.size);
+            } else if matches!(info.compression, Compression::Lzss) {
+                buffer = self.file.read_slice_through_keytable(info.offset, info.size);
+
+                let input = buffer;
+
+                type Lzss = lzss::Lzss<8, 4, 0, { 1 << 8 }, { 2 << 8 }>;
+                let writer = lzss::VecWriter::with_capacity(input.len());
+                
+                buffer = Lzss::decompress_stack(
+                    lzss::SliceReader::new(input.as_slice()),
+                    writer,
+                ).unwrap();
             } else if matches!(info.compression, Compression::Nbz) {
-                //use bzip2_rs::DecoderReader;
-                //let input = buffer;
-                //let mut reader = DecoderReader::new(input.as_slice());
-                //buffer = Vec::new();
-                //std::io::copy(&mut reader, &mut buffer).unwrap();
+                buffer = self.file.read_slice(info.offset, info.size);
+
+                use bzip2_rs::DecoderReader;
+                let input = buffer;
+
+                // First 4 bytes are the original size, the decoder doesn't need this, so we can skip them.
+                let mut reader = DecoderReader::new(&input[4..]);
+                buffer = Vec::new();
+                std::io::copy(&mut reader, &mut buffer).unwrap();
             } else {
-                //buffer = Vec::new();
+                buffer = Vec::new();
             }
 
             return buffer;
