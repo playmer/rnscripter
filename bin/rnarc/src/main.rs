@@ -1,7 +1,7 @@
 use std::{fs::File, io::Write, path::Path};
 
 use clap::Parser;
-use nscripter_archive::nscripter_archive::*;
+use nscripter_formats::archive::*;
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]
