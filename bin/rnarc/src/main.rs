@@ -1,4 +1,4 @@
-use std::{fs::File, io::Write, path::Path};
+use std::{fs::File, io::{Read, Write}, path::Path};
 
 use clap::Parser;
 use nscripter_formats::archive::*;
@@ -25,7 +25,7 @@ struct Args {
 }
 
 fn extract_files(file : File, archive_type : ArchiveType, offset : u32, output_dir : &Path) {
-    let mut reader : ArchiveReader = ArchiveReader::new(file, archive_type, offset, ArchiveReader::default_keytable());
+    let mut reader : ArchiveReader = ArchiveReader::new(file, archive_type, offset, nscripter_formats::default_keytable());
 
     if reader.index.entries_map.contains_key("version.bmp") {
         println!("For debug purposes only extracting version.bmp");
@@ -78,8 +78,52 @@ fn extract_files(file : File, archive_type : ArchiveType, offset : u32, output_d
     }
 }
 
+fn spb_test() {
+    {
+        let file = bmp_rust::bmp::BMP::new_from_file("games\\netannad_og\\arc_nsa\\version.bmp");
+    
+        let mut pixel_buffer : Vec<[u8; 3]> = Vec::new();
+        let bmp_pixel_data = file.get_pixel_data().unwrap();
+        let height = bmp_pixel_data.len() as u16;
+        let width = bmp_pixel_data[0].len() as u16;
+    
+        for row in bmp_pixel_data {
+            for pixel in row {
+                pixel_buffer.push([pixel[0], pixel[1], pixel[2]]);
+            }
+        }
+    
+        let mut image = nscripter_formats::image::Image{pixel_buffer, width, height};
+    
+        //nscripter_formats::image::Image
+        let file_data = nscripter_formats::image::encode_spb(image);
+        
+        let mut file = File::create("games\\netannad_og\\arc_nsa\\version.test.spb").unwrap();
+        file.write_all(&file_data).unwrap();
+    }
+
+
+    {
+        let buffer : Vec<u8> = std::fs::read("games\\netannad_og\\arc_nsa\\version.test.spb").unwrap();
+        let bmp_file = nscripter_formats::image::decode_spb(buffer);
+        
+        let mut file = File::create("games\\netannad_og\\arc_nsa\\version.test.bmp").unwrap();
+        file.write_all(&bmp_file).unwrap();
+
+        //let file = FileHelper {
+        //    File::open("games\\netannad_og\\arc_nsa\\version.spb").unwrap(), 
+        //    nscripter_formats::default_keytable()
+        //};
+        //parse_spb_into_bmp(, offset, size)
+        
+    }
+}
+
 
 fn main() {
+    spb_test();
+
+    return;
     let args = Args::parse();
     let output_dir = Path::new(&args.output);
 

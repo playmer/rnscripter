@@ -2,9 +2,9 @@
 use core::panic;
 use std::{collections::HashMap, fs::File, io::{ErrorKind, Read, SeekFrom}};
 
-struct FileHelper {
-    file : File,
-    key_table : [u8; 256]
+pub struct FileHelper {
+    pub file : File,
+    pub key_table : [u8; 256]
 }
 
 impl FileHelper {
@@ -144,16 +144,19 @@ pub struct ArchiveReader {
 
 // This has got to be the worst part of this project by far. A seemingly completely heretofore undocumented image
 // compression format that exists only within the sources of ONScripter and it's many forks.
-fn parse_spb_into_bmp(file : &mut FileHelper, offset : usize, size : usize) -> Vec<u8> {
-    file.seek(SeekFrom::Start(offset as u64));
-    let width = file.read_u16_be() as usize;
-    let height = file.read_u16_be() as usize;
+pub fn parse_spb_into_bmp(file : &mut FileHelper, offset : usize, size : usize) -> Vec<u8> {
+    //file.seek(SeekFrom::Start(offset as u64));
+    //let width = file.read_u16_be() as usize;
+    //let height = file.read_u16_be() as usize;
 
-    let buffer = file.read_slice_through_keytable(offset + 4, size - 4);
+    let buffer = file.read_slice_through_keytable(offset, size);
     
     use bitbuffer::{BitReadBuffer, BitReadStream, BigEndian};
     let buffer = BitReadBuffer::new(&buffer, BigEndian);
-    let mut stream = BitReadStream::new(buffer);
+    let mut bitstream = BitReadStream::new(buffer);
+
+    let width = bitstream.read_int::<u16>(16).unwrap() as usize;
+    let height = bitstream.read_int::<u16>(16).unwrap() as usize;
     
     let mut pixel_buffer : Vec<u8> = vec![0; (width * height + 4) * 3];
 
@@ -162,16 +165,15 @@ fn parse_spb_into_bmp(file : &mut FileHelper, offset : usize, size : usize) -> V
         let start = (width * height + 4) * channel;
         let end = (width * height + 4) * (channel + 1);
         let channel_buffer = &mut pixel_buffer[start..end];
-
-        let mut data_byte = stream.read_int::<u8>(8).unwrap();
-        let mut i : usize = 0;
-        channel_buffer[i] = data_byte;
-        i += 1;
+        channel_buffer[0] = bitstream.read_int::<u8>(8).unwrap();
+        let mut i : usize = 1;
 
         while i < (width * height) {
+            let mut data_byte = channel_buffer[i - 1];
+
             // Read a 3 bit header from the stream, 3 bits means range is [0,7]
             // This header helps determine how we stamp the next 4 bytes.
-            let header = stream.read_int::<u8>(3).unwrap();
+            let header = bitstream.read_int::<u8>(3).unwrap();
 
             let bits_to_read : u8 = match header {
                 // Stamp 4 identical bytes
@@ -183,34 +185,31 @@ fn parse_spb_into_bmp(file : &mut FileHelper, offset : usize, size : usize) -> V
                     i += 4;
                     continue;
                 }
-                // bits_to_read is within  [3,8]
-                1..=6 => {
+                6 => {
+                    channel_buffer[i]     = bitstream.read_int::<u8>(8).unwrap();
+                    channel_buffer[i + 1] = bitstream.read_int::<u8>(8).unwrap();
+                    channel_buffer[i + 2] = bitstream.read_int::<u8>(8).unwrap();
+                    channel_buffer[i + 3] = bitstream.read_int::<u8>(8).unwrap();
+                    i += 4;
+                    continue;
+                }
+                // bits_to_read is within  [3,7]
+                1..=5 => {
                     header + 2
                 }
+                // bits_to_read is within [1,2], depending on a 1 bit read.
+                // escape sequence in case of adding one or subtracting zero.
                 7 => {
-                    // bits_to_read is within [1,2], depending on a 1 bit read.
-                    stream.read_int::<u8>(1).unwrap() + 1
+                    bitstream.read_int::<u8>(1).unwrap() + 1
                 }
                 _ => {
                     panic!("Impossible value for n (a 3 bit integer) when decoding SPB: {header}");
                 }
             };
-
-            if bits_to_read == 8 {
-                channel_buffer[i]     = stream.read_int::<u8>(8).unwrap();
-                channel_buffer[i + 1] = stream.read_int::<u8>(8).unwrap();
-                channel_buffer[i + 2] = stream.read_int::<u8>(8).unwrap();
-                channel_buffer[i + 3] = stream.read_int::<u8>(8).unwrap();
-
-                data_byte = channel_buffer[i + 3];
-                i += 4;
-                
-                continue;
-            }
             
             // bits_to_read is within [1,7]
             for _ in 0..4 {
-                let modify_byte = stream.read_int::<u8>(bits_to_read as usize).unwrap();
+                let modify_byte = bitstream.read_int::<u8>(bits_to_read as usize).unwrap();
                 
                 // The last bit read is used to determine how we'll be modifying the data byte, after
                 // determining that we throw away that bit.
@@ -344,14 +343,6 @@ impl ArchiveReader {
             ArchiveType::NSA => Self::parse_nsa_header(file, offset),
             ArchiveType::NS2 => Self::parse_ns2_header(file, offset)
         }
-    }
-
-    pub fn default_keytable() ->  [u8; 256] {
-        let mut key_table : [u8; 256] = [0; 256];
-        for (i, val) in key_table.iter_mut().enumerate() {
-            *val = i as u8;
-        }
-        key_table
     }
 
     pub fn new(file : std::fs::File, archive_type : ArchiveType, offset : u32, key_table : [u8; 256]) -> ArchiveReader {
