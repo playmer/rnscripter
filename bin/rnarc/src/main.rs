@@ -117,6 +117,12 @@ fn spb_test() {
         //parse_spb_into_bmp(, offset, size)
         
     }
+
+    {
+        let buffer1 : Vec<u8> = std::fs::read("games\\netannad_og\\arc_nsa\\version.spb").unwrap();
+        let buffer2 : Vec<u8> = std::fs::read("games\\netannad_og\\arc_nsa\\version.test.spb").unwrap();
+        nscripter_formats::image::compare_spb(buffer1, buffer2);
+    }
 }
 
 
