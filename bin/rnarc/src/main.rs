@@ -1,4 +1,4 @@
-use std::{fs::File, io::{Read, Write}, path::Path};
+use std::{fs::File, io::Write, path::Path};
 
 use clap::Parser;
 use nscripter_formats::archive::*;
@@ -15,6 +15,10 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     directory: bool,
 
+    // If we should decompress spb files
+    #[arg(short, long, default_value_t = true)]
+    spb_decode: bool,
+
     /// Name of the directory to output files.
     #[arg(short, long)]
     output: String,
@@ -27,24 +31,6 @@ struct Args {
 fn extract_files(file : File, archive_type : ArchiveType, offset : u32, output_dir : &Path) {
     let mut reader : ArchiveReader = ArchiveReader::new(file, archive_type, offset, nscripter_formats::default_keytable());
 
-    if reader.index.entries_map.contains_key("version.bmp") {
-        println!("For debug purposes only extracting version.bmp");
-
-        let entry_index = reader.index.entries_map["version.bmp"];
-        let info = reader.index.entries[entry_index].info();
-        let data = reader.extract(info);
-
-        let entry = &reader.index.entries[entry_index];
-        let entry_name = entry.name.clone();
-        let entry_path = Path::new(&entry_name);
-        let new_path = output_dir.join(entry_path);
-        std::fs::create_dir_all(&new_path.parent().unwrap()).unwrap();
-
-        let mut file = File::create(&new_path).unwrap();
-        file.write_all(&data).unwrap();
-        return;
-    }
-
     for i in 0..reader.index.entries.len() {
         let info = reader.index.entries[i].info();
 
@@ -56,20 +42,8 @@ fn extract_files(file : File, archive_type : ArchiveType, offset : u32, output_d
 
         let entry = &reader.index.entries[i];
         let entry_name = entry.name.clone();
-        
-        //if matches!(entry.compression, Compression::Spb) {
-        //   entry_name = entry_name + ".zip";
-        //}
-
         let entry_path = Path::new(&entry_name);
         let new_path = output_dir.join(entry_path);
-
-        //if data.len() == 0 {
-        //    println!("Couldn't extract {} of compression type {:?}", &entry.name, &entry.compression);
-        //    continue;
-        //} else {
-        //    println!("Extracting: {} to {}, Compression Type {:?}, Size {}", &entry.name, new_path.to_str().unwrap(), &entry.compression, &entry.size);
-        //}
 
         std::fs::create_dir_all(&new_path.parent().unwrap()).unwrap();
 
@@ -78,6 +52,8 @@ fn extract_files(file : File, archive_type : ArchiveType, offset : u32, output_d
     }
 }
 
+
+/*
 fn spb_test() {
     {
         let file = bmp_rust::bmp::BMP::new_from_file("games\\netannad_og\\arc_nsa\\version.bmp");
@@ -93,7 +69,7 @@ fn spb_test() {
             }
         }
     
-        let mut image = nscripter_formats::image::Image{pixel_buffer, width, height};
+        let image = nscripter_formats::image::Image{pixel_buffer, width, height};
     
         //nscripter_formats::image::Image
         let file_data = nscripter_formats::image::encode_spb(image);
@@ -124,12 +100,12 @@ fn spb_test() {
         nscripter_formats::image::compare_spb(buffer1, buffer2);
     }
 }
-
+ */
 
 fn main() {
-    spb_test();
+    //spb_test();
+    //return;
 
-    return;
     let args = Args::parse();
     let output_dir = Path::new(&args.output);
 

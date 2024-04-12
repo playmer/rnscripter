@@ -1,0 +1,9 @@
+
+
+label = { "*" ~ char+ }
+comment = { ";" ~ char* }
+variable_numeric = { "%" ~ ASCII_DIGIT+ }
+variable_string = { "$" ~ ASCII+ }
+
+
+WHITESPACE = _{ " " | "\t" }

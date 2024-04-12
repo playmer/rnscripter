@@ -1,10 +1,13 @@
 #[allow(dead_code)]
 use core::panic;
-use std::{collections::HashMap, fs::File, io::{ErrorKind, Read, SeekFrom}};
+use std::{collections::HashMap, fs::File, io::{ErrorKind, Read, Seek, SeekFrom}};
+
+use crate::image::decode_spb;
 
 pub struct FileHelper {
     pub file : File,
-    pub key_table : [u8; 256]
+    pub key_table : [u8; 256],
+    pub position : usize
 }
 
 impl FileHelper {
@@ -21,6 +24,8 @@ impl FileHelper {
         for byte in &mut buffer {
             *byte = self.key_table[*byte as usize];
         }
+
+        self.position += N;
 
         buffer
     }
@@ -41,6 +46,12 @@ impl FileHelper {
         const SIZE : usize = std::mem::size_of::<u32>();
         let buffer = self.read_buffer::<SIZE>();
         u32::from_be_bytes(buffer)
+    }
+    
+    fn read_u32_le(&mut self) -> u32 {
+        const SIZE : usize = std::mem::size_of::<u32>();
+        let buffer = self.read_buffer::<SIZE>();
+        u32::from_le_bytes(buffer)
     }
 
     fn read_shiftjis(&mut self) -> String {
@@ -65,17 +76,43 @@ impl FileHelper {
         res.to_string()
     }
 
+    fn read_quoted_shiftjis(&mut self) -> String {
+        let mut buffer : Vec<u8> = Vec::new();
+
+        let first_byte = self.read_u8();
+        if first_byte != b'\"' {
+            panic!("Archive unexpectedly doesn't have a quoted string: {first_byte}.");
+        }
+            
+        loop {
+            let byte = self.read_u8();
+            
+            if byte == b'\"' {
+                break;
+            }
+            
+            buffer.push(byte);
+        }
+
+        use encoding_rs::SHIFT_JIS;
+        let (res, _enc, errors) = SHIFT_JIS.decode(&buffer);
+        if errors {
+            panic!("Couldn't read a string from this file.");
+        }
+
+        res.to_string()
+    }
+
     fn seek(&mut self, seek : SeekFrom) {
-        use std::io::Seek;
-        self.file.seek(seek).unwrap();
+        self.position = self.file.seek(seek).unwrap() as usize;
     }
 
     fn read_slice(&mut self, offset : usize, size : usize) -> Vec<u8> {
-        use std::io::Seek;
-
         self.file.seek(SeekFrom::Start(offset as u64)).unwrap();
         let mut buffer : Vec<u8> = vec![0; size];
         self.file.read(&mut buffer).unwrap();
+
+        self.position += size;
 
         buffer
     }
@@ -85,6 +122,8 @@ impl FileHelper {
         for byte in &mut output {
             *byte = self.key_table[*byte as usize];
         }
+
+        // read_slize alters self.position, don't need to do it redundantly here.
 
         output
     }
@@ -115,7 +154,7 @@ pub struct ArchiveEntry {
 pub struct ArchiveEntryInfo {
     pub offset : usize,
     pub size : usize,
-    decompressed_size : Option<usize>,
+    _decompressed_size : Option<usize>,
     pub compression : Compression
 }
 
@@ -124,7 +163,7 @@ impl ArchiveEntry {
         ArchiveEntryInfo {
             offset : self.offset, 
             size : self.size, 
-            decompressed_size : self.decompressed_size, 
+            _decompressed_size : self.decompressed_size, 
             compression : self.compression, 
         }
     }
@@ -140,118 +179,6 @@ pub struct ArchiveReader {
     file : FileHelper,
     pub index : ArchiveIndex,
     pub archive_type : ArchiveType,
-}
-
-// This has got to be the worst part of this project by far. A seemingly completely heretofore undocumented image
-// compression format that exists only within the sources of ONScripter and it's many forks.
-pub fn parse_spb_into_bmp(file : &mut FileHelper, offset : usize, size : usize) -> Vec<u8> {
-    //file.seek(SeekFrom::Start(offset as u64));
-    //let width = file.read_u16_be() as usize;
-    //let height = file.read_u16_be() as usize;
-
-    let buffer = file.read_slice_through_keytable(offset, size);
-    
-    use bitbuffer::{BitReadBuffer, BitReadStream, BigEndian};
-    let buffer = BitReadBuffer::new(&buffer, BigEndian);
-    let mut bitstream = BitReadStream::new(buffer);
-
-    let width = bitstream.read_int::<u16>(16).unwrap() as usize;
-    let height = bitstream.read_int::<u16>(16).unwrap() as usize;
-    
-    let mut pixel_buffer : Vec<u8> = vec![0; (width * height + 4) * 3];
-
-    // Read each channel of image data, in BGR order.
-    for channel in (0..3).rev() {
-        let start = (width * height + 4) * channel;
-        let end = (width * height + 4) * (channel + 1);
-        let channel_buffer = &mut pixel_buffer[start..end];
-        channel_buffer[0] = bitstream.read_int::<u8>(8).unwrap();
-        let mut i : usize = 1;
-
-        while i < (width * height) {
-            let mut data_byte = channel_buffer[i - 1];
-
-            // Read a 3 bit header from the stream, 3 bits means range is [0,7]
-            // This header helps determine how we stamp the next 4 bytes.
-            let header = bitstream.read_int::<u8>(3).unwrap();
-
-            let bits_to_read : u8 = match header {
-                // Stamp 4 identical bytes
-                0 => {
-                    channel_buffer[i]     = data_byte;
-                    channel_buffer[i + 1] = data_byte;
-                    channel_buffer[i + 2] = data_byte;
-                    channel_buffer[i + 3] = data_byte;
-                    i += 4;
-                    continue;
-                }
-                6 => {
-                    channel_buffer[i]     = bitstream.read_int::<u8>(8).unwrap();
-                    channel_buffer[i + 1] = bitstream.read_int::<u8>(8).unwrap();
-                    channel_buffer[i + 2] = bitstream.read_int::<u8>(8).unwrap();
-                    channel_buffer[i + 3] = bitstream.read_int::<u8>(8).unwrap();
-                    i += 4;
-                    continue;
-                }
-                // bits_to_read is within  [3,7]
-                1..=5 => {
-                    header + 2
-                }
-                // bits_to_read is within [1,2], depending on a 1 bit read.
-                // escape sequence in case of adding one or subtracting zero.
-                7 => {
-                    bitstream.read_int::<u8>(1).unwrap() + 1
-                }
-                _ => {
-                    panic!("Impossible value for n (a 3 bit integer) when decoding SPB: {header}");
-                }
-            };
-            
-            // bits_to_read is within [1,7]
-            for _ in 0..4 {
-                let modify_byte = bitstream.read_int::<u8>(bits_to_read as usize).unwrap();
-                
-                // The last bit read is used to determine how we'll be modifying the data byte, after
-                // determining that we throw away that bit.
-                let add = (modify_byte & 1) > 0;
-                let modify_byte = modify_byte >> 1;
-                
-                if add {
-                    data_byte += modify_byte + 1;
-                } else {
-                    data_byte -= modify_byte;
-                }
-
-                channel_buffer[i] = data_byte;
-                i += 1;
-            }
-        }
-    }
-
-    let r_buffer = &pixel_buffer[0..(width * height + 4)];
-    let g_buffer = &pixel_buffer[(width * height + 4)..(width * height + 4) * 2];
-    let b_buffer = &pixel_buffer[(width * height + 4) * 2..(width * height + 4) * 3];
-
-    // We've read all the channels, we can comfortably blit out a BMP now.
-    let mut bmp_file = bmp_rust::bmp::BMP::new(height as i32, width as u32, None);
-    for y in 0..height {
-        let row_skip = y * width;
-        for x in 0..width {
-            // If we're on an odd row, we read backwards
-            let i = if (y & 1) == 1 {
-                ((width - 1) - x ) + row_skip
-            } else {
-                x + row_skip
-            };
-
-            let r = r_buffer[i];
-            let g = g_buffer[i];
-            let b = b_buffer[i];
-            bmp_file.change_color_of_pixel(x as u16, y as u16, [r,g,b,255]).expect("Failed to change color of pixel");
-        }
-    }
-
-    bmp_file.contents
 }
 
 impl ArchiveReader {
@@ -331,9 +258,44 @@ impl ArchiveReader {
         ArchiveIndex{ entries, entries_map, offset : file_offset }
     }
     
-    fn parse_ns2_header(_file : &mut FileHelper, _offset : u32) -> ArchiveIndex {
-        let entries : Vec<ArchiveEntry> = Vec::new();
-        let entries_map : HashMap<String, usize> = HashMap::new();
+    fn parse_ns2_header(file : &mut FileHelper, offset : u32) -> ArchiveIndex {
+        let mut entries : Vec<ArchiveEntry> = Vec::new();
+        let offset_of_file_data = (file.read_u32_le() + offset) as usize; // Entries start at this address in the file
+        let mut file_offset = offset_of_file_data;
+
+        while file.position < (offset_of_file_data - 1) {
+            let name = file.read_quoted_shiftjis();
+            let size = file.read_u32_le() as usize;
+            let offset = file_offset;
+            //let decompressed_size = 0;
+            
+            let lowercase_name = name.to_lowercase();
+            let compression =  if lowercase_name.ends_with(".nbz") {
+                Compression::Bzip2
+            } else if lowercase_name.ends_with(".spb") {
+                Compression::Spb
+            } else {
+                Compression::None
+            };
+            
+
+            println!("{name}: {size}: {file_offset}");
+            
+            entries.push(ArchiveEntry {
+                name, offset: file_offset, size, decompressed_size: None, compression
+            });
+            
+            file_offset += size
+        }
+        
+        let unknown_value = file.read_u8();
+        println!("Header end byte: {unknown_value}");
+        
+        let mut entries_map : HashMap<String, usize> = HashMap::new();
+        for (i, entry) in entries.iter().enumerate() {
+            entries_map.insert(entry.name.clone(), i);
+        }
+
         ArchiveIndex{ entries, entries_map, offset : 0 }
     }
 
@@ -346,7 +308,7 @@ impl ArchiveReader {
     }
 
     pub fn new(file : std::fs::File, archive_type : ArchiveType, offset : u32, key_table : [u8; 256]) -> ArchiveReader {
-        let mut file_helper = FileHelper {file, key_table};
+        let mut file_helper = FileHelper {file, key_table, position : 0};
         let index = Self::parse_header(&mut file_helper, &archive_type, offset);
 
         ArchiveReader {
@@ -356,17 +318,13 @@ impl ArchiveReader {
         }
     }
 
-    
-
-
-
     pub fn extract(&mut self, info : ArchiveEntryInfo) -> Vec<u8> {
         let mut buffer : Vec<u8>;
 
         if matches!(info.compression, Compression::None) {
             buffer = self.file.read_slice_through_keytable(info.offset, info.size);
         } else if matches!(info.compression, Compression::Spb) {
-            buffer = parse_spb_into_bmp(&mut self.file, info.offset, info.size);
+            buffer = decode_spb(self.file.read_slice(info.offset, info.size)).unwrap();
         } else if matches!(info.compression, Compression::Lzss) {
             buffer = self.file.read_slice_through_keytable(info.offset, info.size);
 

@@ -13,11 +13,10 @@ pub fn default_keytable() ->  [u8; 256] {
 }
 
 pub fn create_keytable(file : &str) ->  [u8; 256] {
-    let mut buffer = std::fs::read(file).unwrap();
+    let buffer = std::fs::read(file).unwrap();
     let mut table : [u8; 256] = [0; 256];
     let mut found_table = false;
 
-    let i = 0;
     for i in 0..buffer.len() {
         found_table = false;
         'sequence: for (table_index, buffer_index) in (i..buffer.len()).enumerate() {
