@@ -1,6 +1,6 @@
 #[allow(dead_code)]
 use core::panic;
-use std::{collections::HashMap, fs::File, io::{ErrorKind, Read, Seek, SeekFrom}};
+use std::{collections::HashMap, fs::File, io::{ErrorKind, Read, Seek, SeekFrom, Write}, path::Path};
 
 use crate::image::decode_spb;
 
@@ -53,6 +53,22 @@ impl FileHelper {
         let buffer = self.read_buffer::<SIZE>();
         u32::from_le_bytes(buffer)
     }
+    
+    fn write_u8_be(&mut self, value : u8) {
+        self.file.write_all(&value.to_be_bytes()).unwrap();
+    }
+    
+    fn write_u16_be(&mut self, value : u16) {
+        self.file.write_all(&value.to_be_bytes()).unwrap();
+    }
+    
+    fn write_u32_be(&mut self, value : u32) {
+        self.file.write_all(&value.to_be_bytes()).unwrap();
+    }
+
+    fn write_u32_le(&mut self, value : u32) {
+        self.file.write_all(&value.to_le_bytes()).unwrap();
+    }
 
     fn read_shiftjis(&mut self) -> String {
         let mut buffer : Vec<u8> = Vec::new();
@@ -74,6 +90,16 @@ impl FileHelper {
         }
 
         res.to_string()
+    }
+
+    fn write_shiftjis(&mut self, value : &str) {
+        use encoding_rs::SHIFT_JIS;
+        let (res, _enc, errors) = SHIFT_JIS.encode(&value);
+        if errors {
+            panic!("Couldn't read a string from this file.");
+        }
+        
+        self.file.write_all(res.as_ref()).unwrap();
     }
 
     fn read_quoted_shiftjis(&mut self) -> String {
@@ -101,6 +127,19 @@ impl FileHelper {
         }
 
         res.to_string()
+    }
+    
+
+    fn write_quoted_shiftjis(&mut self, value : &str) {
+        use encoding_rs::SHIFT_JIS;
+        let (res, _enc, errors) = SHIFT_JIS.encode(&value);
+        if errors {
+            panic!("Couldn't read a string from this file.");
+        }
+        
+        self.file.write(b"\"").unwrap();
+        self.file.write_all(res.as_ref()).unwrap();
+        self.file.write(b"\"").unwrap();
     }
 
     fn seek(&mut self, seek : SeekFrom) {
@@ -175,13 +214,67 @@ pub struct ArchiveIndex {
     pub offset : usize
 }
 
-pub struct ArchiveReader {
+pub struct Archive {
     file : FileHelper,
     pub index : ArchiveIndex,
     pub archive_type : ArchiveType,
 }
 
-impl ArchiveReader {
+pub fn extract_bz2(file: File, key_table : [u8; 256]) -> Vec<u8> {
+    let mut file = file;
+    let size = file.seek(SeekFrom::End(0)).unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let mut file_helper = FileHelper {file, key_table, position : 0};
+    let buffer = file_helper.read_slice(0, size as usize);
+
+    use bzip2_rs::DecoderReader;
+    let input = buffer;
+
+    // First 4 bytes are the original size, the decoder doesn't need this, so we can skip them.
+    let mut reader = DecoderReader::new(&input[4..]);
+    let mut buffer = Vec::new();
+    std::io::copy(&mut reader, &mut buffer).unwrap();
+
+    return buffer;
+}
+
+impl Archive {
+    /*
+    fn write_sar_header(&self, archive : &mut Archive) {
+        let mut offsets : Vec<(usize, usize)> = Vec::new();
+        archive.file.seek(SeekFrom::Start(archive.index.offset as u64));
+
+        // TODO: Should check this cast
+        archive.file.write_u16_be(archive.index.entries.len() as u16);
+
+        // Skip writing out the internal offset for now.
+        archive.file.seek(SeekFrom::Current(4));
+
+        for entry in &archive.index.entries {
+            archive.file.write_shiftjis(&entry.name);
+            
+            // Skip writing out the internal offset for now.
+            offsets.push((archive.file.position, entry.size));
+            archive.file.seek(SeekFrom::Current(4));
+
+            // TODO: Should check this cast
+            archive.file.write_u32_be(entry.size as u32);
+        }
+
+        let file_offset = archive.file.position;
+        archive.file.seek(SeekFrom::Start(archive.index.offset as u64 + 2));
+        archive.file.write_u32_be(file_offset);
+
+        for (offset_position, entry_size) in offsets {
+            archive.file.seek(SeekFrom::Start(archive.index.offset as u64 + 2));
+            archive.file.write_u32_be(file_offset);
+        }
+
+        //archive.file.write_u32_be(archive.index.offset )
+    } 
+    */
+
+
     fn parse_sar_header(file : &mut FileHelper, offset : u32) -> ArchiveIndex {
         let mut entries : Vec<ArchiveEntry> = Vec::new();
         let num_of_entries = file.read_u16_be();
@@ -266,7 +359,6 @@ impl ArchiveReader {
         while file.position < (offset_of_file_data - 1) {
             let name = file.read_quoted_shiftjis();
             let size = file.read_u32_le() as usize;
-            let offset = file_offset;
             //let decompressed_size = 0;
             
             let lowercase_name = name.to_lowercase();
@@ -284,7 +376,7 @@ impl ArchiveReader {
             entries.push(ArchiveEntry {
                 name, offset: file_offset, size, decompressed_size: None, compression
             });
-            
+
             file_offset += size
         }
         
@@ -307,11 +399,11 @@ impl ArchiveReader {
         }
     }
 
-    pub fn new(file : std::fs::File, archive_type : ArchiveType, offset : u32, key_table : [u8; 256]) -> ArchiveReader {
+    pub fn new(file : std::fs::File, archive_type : ArchiveType, offset : u32, key_table : [u8; 256]) -> Archive {
         let mut file_helper = FileHelper {file, key_table, position : 0};
         let index = Self::parse_header(&mut file_helper, &archive_type, offset);
 
-        ArchiveReader {
+        Archive {
             file : file_helper,
             index,
             archive_type,
