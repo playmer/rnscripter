@@ -11,10 +11,6 @@ struct Arguments {
     #[arg(short, long)]
     path: String,
 
-    //// If we should decompress spb files
-    //#[arg(short, long, default_value_t = true)]
-    //spb_decode: bool,
-
     /// Name of the directory to output files.
     #[arg(short, long)]
     output: String,
@@ -22,97 +18,20 @@ struct Arguments {
     /// Offset of data within archive
     #[arg(long, default_value_t = 0)]
     offset: u32,
+    
+    /// This will determine if we should list out File by File what we're extracting.
+    #[arg(short, long, default_value_t = false)]
+    verbose: bool,
+    
+    /// This will ensure we entirely overwrite the output directory. All existing files within will be deleted, not just ones that might be overwritten.
+    /// 
+    /// Otherwise, we'll fail out when trying to overwrite a file.
+    #[arg(short, long, default_value_t = false)]
+    force: bool,
 }
 
-
-
-/*
-#[derive(Parser)]
-#[command(version, about, long_about = None)]
-#[command(propagate_version = true)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Adds files to myapp
-    Encode (EncodeAndDecodeArgs),
-    Decode (EncodeAndDecodeArgs),
-}
-
-
-#[derive(Args)]
-struct EncodeAndDecodeArgs {
-    game_or_file : GameOrFile
-}
-
-#[derive(Subcommand, Clone)]
-enum GameOrFile {
-    // We'll try to encode/decode an entire game.
-    Game {
-        // Source for encode/decode, should be a directory
-        src : String,
-        // Destination for encode/decode, should be a directory
-        dst : String,
-    },
-    // We'll try to encode/decode a single file.
-    File {
-        // Source for encode/decode, should be a directory
-        src : String,
-        // Destination for encode/decode, should be a directory
-        dst : String,
-    },
-}
-
-
-//
-//#[derive(Parser, Debug)]
-//#[clap(name = "rnarc", version)]
-//pub struct App {
-//    #[clap(subcommand)]
-//    command: Command,
-//}
-//
-//#[derive(Debug, Subcommand)]
-//enum Command {
-//    #[clap(subcommand)]
-//    /// In encode you can encode an entire game or single file.
-//    Encode (GameOrFile),
-//    
-//    #[clap(subcommand)]
-//    /// In decode you can decode an entire game or single file.
-//    Decode (GameOrFile),
-//}
-//
-//#[derive(Debug, Subcommand)]
-//enum GameOrFile {
-//    // We'll try to encode/decode an entire game.
-//    Game (GameArgs),
-//    // We'll try to encode/decode a single file.
-//    File (FileArgs),
-//}
-//
-//#[derive(Debug, Args)]
-//struct GameArgs {
-//    // Source for encode/decode, should be a directory
-//    src : String,
-//    // Destination for encode/decode, should be a directory
-//    dst : String,
-//}
-//
-//#[derive(Debug, Args)]
-//struct FileArgs {
-//    // Source for encode/decode, should be a directory
-//    src : String,
-//    // Destination for encode/decode, should be a directory
-//    dst : String,
-//}
-
- */
-
-fn extract_files(file : File, archive_type : ArchiveType, offset : u32, output_dir : &Path) {
+fn extract_files(path : &Path, archive_type : ArchiveType, offset : u32, output_dir : &Path, verbose: bool) {
+    let file = std::fs::File::open(&path).unwrap();
     let mut reader : Archive = Archive::new(file, archive_type, offset, nscripter_formats::default_keytable());
 
     for i in 0..reader.index.entries.len() {
@@ -130,6 +49,10 @@ fn extract_files(file : File, archive_type : ArchiveType, offset : u32, output_d
         let new_path = output_dir.join(entry_path);
 
         std::fs::create_dir_all(&new_path.parent().unwrap()).unwrap();
+        
+        if verbose {
+            println!("Extracting file {} from archive {} to {}", entry_path.to_str().unwrap(), path.to_str().unwrap(), new_path.to_str().unwrap());
+        }
 
         let mut file = File::create(&new_path).unwrap();
         file.write_all(&data).unwrap();
@@ -148,8 +71,9 @@ fn detect_file_type(data: &Vec<u8>) -> String {
 
 }
 
-fn process_file(path: &Path, output_dir : &Path, offset: u32) {
+fn process_file(path: &Path, arguments : &Arguments) {
     let file_name = path.file_name().unwrap().to_str().unwrap().to_lowercase();
+    let output_dir = Path::new(&arguments.output);
     
     // Technically some of these can spread between different archives, and if they're not named sequentially there could be issues,
     // and if they're not just numbers between "arc" and the archive type that's also wrong, but for now lets just assume this is
@@ -168,6 +92,10 @@ fn process_file(path: &Path, output_dir : &Path, offset: u32) {
         let new_path = output_dir.join(format!("{}{}", path.file_stem().to_owned().unwrap().to_str().unwrap(), file_ext));
         let mut file = File::create(&new_path).unwrap();                
         file.write_all(&decoded_data).unwrap();
+        
+        if arguments.verbose {
+            println!("Decoding loose nbz file {} to {}", path.to_str().unwrap(), new_path.to_str().unwrap());
+        }
         return;
     } else if file_name.ends_with(".spb") {
         let data = std::fs::read(&path).unwrap();
@@ -176,18 +104,24 @@ fn process_file(path: &Path, output_dir : &Path, offset: u32) {
         let new_path = output_dir.join(path.file_stem().to_owned().unwrap().to_str().unwrap());
         let mut file = File::create(&new_path).unwrap();                
         file.write_all(&decoded_data).unwrap();
+
+        if arguments.verbose {
+            println!("Decoding loose spb image {} to {}", path.to_str().unwrap(), new_path.to_str().unwrap());
+        }
         return;
     }
     else {
         let new_path = output_dir.join(path.file_name().to_owned().unwrap().to_str().unwrap());
-        println!("Copying {} to {}...", path.to_str().unwrap(), new_path.to_str().unwrap());
+        
+        if arguments.verbose {
+            println!("Copying loose file {} to {}", path.to_str().unwrap(), new_path.to_str().unwrap());
+        }
         std::fs::copy(&path, new_path).unwrap();
         return;
     };
     
-    let file = std::fs::File::open(&path).unwrap();
-    let output_dir = output_dir.join(file_name.replace(".", "_"));
-    extract_files(file, archive_type, offset, &output_dir);
+    let output_dir = output_dir.join(file_name);
+    extract_files(&path, archive_type, arguments.offset, &output_dir, arguments.verbose);
 }
 
 
@@ -241,9 +175,18 @@ fn spb_test() {
  */
 
 fn main() {
-    let args = Arguments::parse();
-    let output_dir = Path::new(&args.output);
-    let path = Path::new(&args.path);
+    let arguments = Arguments::parse();
+    let output_dir = Path::new(&arguments.output);
+    let path = Path::new(&arguments.path);
+
+    if output_dir.exists() {
+        if !arguments.force {
+            println!("{} exists, if you wish to delete it's contents and write out the archive from scratch, pass --force or -f.", arguments.output);
+            return;
+        } else {
+            std::fs::remove_dir_all(output_dir).unwrap();
+        }
+    }
     
     std::fs::create_dir(output_dir).unwrap();
 
@@ -252,9 +195,9 @@ fn main() {
 
         for path in paths {
             let path = path.unwrap().path();
-            process_file(&path, &output_dir, args.offset);
+            process_file(&path, &arguments);
         }
     } else {
-        process_file(&path, &output_dir, args.offset);
+        process_file(&path, &arguments);
     }
 }

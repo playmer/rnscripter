@@ -1,0 +1,33 @@
+name: hosted-ninja-vcpkg_submod-autocache
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+  schedule:
+  - cron: '0 1 * * *'
+
+jobs:
+  windows:
+    name: windows-build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+    runs-on: windows-latest
+    
+    steps:      
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+
+      - name: Configure, Build, and Package
+        run: |
+            cargo build --release
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: Windows Build
+          path: |
+            ${{ github.workspace }}/target/release/rndecode.exe
