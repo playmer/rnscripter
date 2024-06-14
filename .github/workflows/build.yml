@@ -22,7 +22,7 @@ jobs:
         with:
           submodules: true
 
-      - name: Configure, Build, and Package
+      - name: Build
         run: |
             cargo build --release
 
