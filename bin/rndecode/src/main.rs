@@ -1,6 +1,6 @@
 use std::{fs::File, io::Write, path::Path};
 
-use clap::{Args, Parser, Subcommand};
+use clap::Parser;
 use nscripter_formats::archive::*;
 use nscripter_formats::image::decode_spb;
 

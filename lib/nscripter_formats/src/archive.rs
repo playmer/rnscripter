@@ -1,6 +1,5 @@
-#[allow(dead_code)]
 use core::panic;
-use std::{collections::HashMap, fs::File, io::{ErrorKind, Read, Seek, SeekFrom, Write}, path::Path};
+use std::{collections::HashMap, fs::File, io::{ErrorKind, Read, Seek, SeekFrom, Write}};
 
 use crate::image::decode_spb;
 
@@ -10,6 +9,7 @@ pub struct FileHelper {
     pub position : usize
 }
 
+#[allow(dead_code)]
 impl FileHelper {
     fn read_buffer<const N: usize>(&mut self) -> [u8; N] {
         let mut buffer = [0u8; N];

@@ -28,6 +28,6 @@ jobs:
 
       - uses: actions/upload-artifact@v3
         with:
-          name: Windows Build
+          name: rnscripter_windows
           path: |
             ${{ github.workspace }}/target/release/rndecode.exe
