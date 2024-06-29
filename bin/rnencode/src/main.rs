@@ -3,7 +3,6 @@ use std::{fs::File, io::Write, path::Path};
 
 use clap::Parser;
 use nscripter_formats::archive::*;
-use nscripter_formats::image::decode_spb;
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
@@ -17,9 +16,32 @@ struct Arguments {
     #[arg(short, long)]
     output: String,
 
-    /// Offset of data within archive
+    /// Offset of data within archive, defaults to 0.
     #[arg(long, default_value_t = 0)]
     offset: u32,
+
+    /// Path to a key table, this adds a layer of obfuscation to created archives. A key table should be a file containing 256 bytes, which
+    /// each have a unique number [0, 255]. Effectively this is a lookup table for whenever we would write a byte, we lookup in the key table
+    /// what we should write instead. You may pass an executable file which will be scanned looking for an embedded key table.
+    /// 
+    /// When playing a game with obfuscated archives in ONScripter, you would pass this key table file with the 
+    /// `--key-exe` command line option so it can do the same in reverse.
+    #[arg(short, long)]
+    key_file: Option<String>,
+    
+    /// When creating nsa archives, this flag decides if we should use BZip2 compression on BMP and WAV files. 
+    /// 
+    /// Note: Equivalent of the enhanced flag in nsamake from ONScripter.
+    #[arg(short, long, default_value_t = false)]
+    bzip2: bool,
+
+    /// When creating nsa archives, this flag decides if we should use SPB compression on BMP files.
+    /// 
+    /// Note: If used in conjunction with bzip2 flag, we will only compress BMP with SPB compression, only WAV files will use BZip2.
+    /// There haven't been tests done to determine which is, on average, better for BMP files, so ultimately you should test and check
+    /// on your own data.
+    #[arg(short, long, default_value_t = false)]
+    spb: bool,
     
     /// This will determine if we should list out File by File what we're extracting.
     #[arg(short, long, default_value_t = false)]
@@ -40,10 +62,9 @@ fn detect_file_type(data: &Vec<u8>) -> String {
     } else {
         return "".to_string()
     }
-
 }
 
-fn archive_directory(archive_dir: &Path, output_file: &Path)
+fn collect_entries(archive_dir: &Path, output_file: &Path) -> Vec<PathBuf>
 {
     let mut entries_to_archive : Vec<PathBuf> = Vec::new();
     for entry in WalkDir::new(&archive_dir) {
@@ -55,13 +76,10 @@ fn archive_directory(archive_dir: &Path, output_file: &Path)
         }
 
         let entry = entry_fullpath.strip_prefix(&archive_dir).unwrap();
-
         entries_to_archive.push(entry.to_owned());
-        //println!("{}", entry.display());
     }
 
-    let file = File::create(&output_file).unwrap();
-    Archive::create_sar_archive(file, archive_dir, entries_to_archive, 0, nscripter_formats::default_keytable());
+    return entries_to_archive;
 }
 
 fn main() {
@@ -80,10 +98,23 @@ fn main() {
         }
     }
     
-    //std::fs::create_dir(&output).unwrap();
+    let lowercase_name = arguments.output.to_lowercase();
+    if lowercase_name.ends_with(".sar") || lowercase_name.ends_with(".nsa") || lowercase_name.ends_with(".ns2") {
+        let file = File::create(&output).unwrap();
 
-    if path.is_dir() {
-        archive_directory(&path, &output);
-    } else {
+        //std::fs::create_dir(&output).unwrap();
+        let entries_to_archive = collect_entries(&path, &output);
+
+        if lowercase_name.ends_with(".sar") {
+            Archive::create_sar_archive(file, &path, entries_to_archive, nscripter_formats::default_keytable());
+        }
+        else if lowercase_name.ends_with(".nsa") {
+            Archive::create_nsa_archive(file, &path, entries_to_archive, arguments.offset as usize, nscripter_formats::default_keytable(), arguments.bzip2, arguments.spb);
+        }
+        else if lowercase_name.ends_with(".ns2")  {
+        }
+    }
+    else {
+
     }
 }

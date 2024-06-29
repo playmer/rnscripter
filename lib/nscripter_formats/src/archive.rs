@@ -1,7 +1,8 @@
 use core::panic;
 use std::{collections::HashMap, fs::File, io::{ErrorKind, Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}};
+use bzip2::read::{BzDecoder, BzEncoder};
 
-use crate::image::decode_spb;
+use crate::image::{decode_spb, encode_spb};
 
 pub struct FileHelper {
     pub file : File,
@@ -59,8 +60,8 @@ impl FileHelper {
         u32::from_le_bytes(buffer)
     }
     
-    fn write_u8_be(&mut self, value : u8) {
-        self.write_buffer(&value.to_be_bytes());
+    fn write_u8(&mut self, value : u8) {
+        self.write_buffer(&value.to_le_bytes());
     }
     
     fn write_u16_be(&mut self, value : u16) {
@@ -147,7 +148,7 @@ impl FileHelper {
         self.write_buffer(b"\"");
     }
 
-    fn write_file(&mut self, src: &mut File, buffer: &mut [u8; 64536])
+    fn write_file(&mut self, src: &mut dyn Read, buffer: &mut [u8; 64536])
     {
         loop {
             match src.read(buffer) {
@@ -250,11 +251,11 @@ pub fn extract_bz2(file: File, key_table : [u8; 256]) -> Vec<u8> {
     let mut file_helper = FileHelper {file, key_table, position : 0};
     let buffer = file_helper.read_slice(0, size as usize);
 
-    use bzip2_rs::DecoderReader;
+    use bzip2::read::{BzDecoder};
     let input = buffer;
 
     // First 4 bytes are the original size, the decoder doesn't need this, so we can skip them.
-    let mut reader = DecoderReader::new(&input[4..]);
+    let mut reader = BzDecoder::new(&input[4..]);
     let mut buffer = Vec::new();
     std::io::copy(&mut reader, &mut buffer).unwrap();
 
@@ -323,7 +324,7 @@ impl Archive {
         ArchiveIndex{ entries, entries_map, offset : file_offset }
     }
     
-    pub fn create_sar_archive(file: File, root_dir: &Path, entries : Vec<PathBuf>, offset : u32, key_table : [u8; 256]) -> bool {
+    pub fn create_sar_archive(file: File, root_dir: &Path, entries : Vec<PathBuf>, key_table : [u8; 256]) -> bool {
         let mut file_helper = FileHelper {file, key_table, position : 0};
 
         if (u16::MAX as usize) < entries.len() {
@@ -332,7 +333,6 @@ impl Archive {
 
         let mut entry_offset_locations = Vec::new();
 
-        println!("Entries: {}", entries.len());
 
         file_helper.write_u16_be(entries.len() as u16);
         file_helper.write_u32_be(0);
@@ -349,12 +349,9 @@ impl Archive {
             entry_offset_locations.push(file_helper.position);            
             file_helper.write_u32_be(0);
             file_helper.write_u32_be(entry_size as u32);
-
-            println!("Entry {}, {}", &entry_inner_path, entry_size);
         }
 
         let end_of_header = file_helper.position;
-        println!("End of Header: {end_of_header}");
 
         file_helper.seek(SeekFrom::Start(2));
         file_helper.write_u32_be(end_of_header as u32);
@@ -428,6 +425,128 @@ impl Archive {
         }
 
         ArchiveIndex{ entries, entries_map, offset : file_offset }
+    }
+
+    
+    fn file_encoding_to_use(file_path: &Path, bzip2: bool, spb: bool) -> Compression {
+        if !bzip2 && !spb {
+            return Compression::None;
+        }
+
+        let entry_inner_path = file_path.to_str().unwrap();
+        let lowercase_name = entry_inner_path.to_lowercase();
+        if !lowercase_name.ends_with(".wav") && !lowercase_name.ends_with(".bmp") {
+            return Compression::None;
+        }
+
+        let mut entry_file = std::fs::File::open(&file_path).unwrap();
+        let mut header_bytes : [u8; 4] = [0; 4];
+        entry_file.read(&mut header_bytes);
+
+        if header_bytes[0] == b'R' && header_bytes[1] == b'I' && header_bytes[2] == b'F' && header_bytes[3] == b'F' {
+            match bzip2 {
+                true => return Compression::Bzip2,
+                false => return Compression::None
+            }
+        } else if header_bytes[0] == b'B' && header_bytes[1] == b'M' {
+            if spb {
+                return Compression::Spb;
+            }
+            else if bzip2 {
+                return Compression::Bzip2;
+            }
+            else {
+                return Compression::None;
+            }
+        } else {
+            return Compression::None
+        }
+    }
+
+    fn compression_to_byte(compression: Compression) -> u8 {
+        match compression {
+            Compression::None => return 0,
+            Compression::Spb => return 1,
+            Compression::Lzss => return 2,
+            Compression::Bzip2 => return 4,
+        }
+    }
+    
+    pub fn create_nsa_archive(file: File, root_dir: &Path, entries : Vec<PathBuf>, offset: usize, key_table : [u8; 256], bzip2: bool, spb: bool) -> bool {
+        let mut file_helper = FileHelper {file, key_table, position : 0};
+
+        if (u16::MAX as usize) < entries.len() {
+            return false;
+        }
+
+        let mut entry_offset_locations: Vec<(usize, Compression)> = Vec::new();
+
+        file_helper.write_u16_be(entries.len() as u16);
+        file_helper.write_u32_be(0);
+
+        for entry in &entries {
+            let full_path = root_dir.join(&entry);
+            let entry_inner_path = entry.to_str().unwrap();
+
+            file_helper.write_shiftjis(&entry_inner_path);
+
+            let encoding = Self::file_encoding_to_use(&full_path, bzip2, spb);
+            let compress_byte = Self::compression_to_byte(encoding);
+            file_helper.write_u8(compress_byte);
+
+            // Note down where this offset value is for later.
+            entry_offset_locations.push((file_helper.position, encoding));
+            file_helper.write_u32_be(0); // offset
+            file_helper.write_u32_be(0); // size
+            file_helper.write_u32_be(0); // decompressed size
+        }
+
+        let end_of_header = file_helper.position + offset;
+
+        file_helper.seek(SeekFrom::Start(2));
+        file_helper.write_u32_be(end_of_header as u32);
+        file_helper.seek(SeekFrom::Start(end_of_header as u64));
+        
+        // We only want to init this once for all files, so the buffer lives outside of the read_file_into_file call.
+        let mut buffer : [u8; 64536] = [0; 64536];
+        
+        for (entry_file_name, (entry_offset_location, compression)) in entries.iter().zip(&entry_offset_locations) {
+            let fullpath = root_dir.join(&entry_file_name);
+            let mut entry_file = std::fs::File::open(&fullpath).unwrap();
+            let entry_offset = file_helper.position;
+            
+            file_helper.seek(SeekFrom::Start(entry_offset as u64));
+
+            
+            let decompressed_size = entry_file.seek(SeekFrom::End(0)).unwrap();
+            entry_file.seek(SeekFrom::Start(0)).unwrap();
+
+            let compressed_size = match compression {
+                Compression::None => {
+                    file_helper.write_file(&mut entry_file, &mut buffer);
+                    decompressed_size
+                },
+                Compression::Spb => {
+                    //encode_spb()
+                    decompressed_size
+                },
+                Compression::Lzss => {
+                    decompressed_size
+                },
+                Compression::Bzip2 => {
+                    let mut compressor = BzEncoder::new(entry_file, bzip2::Compression::best());
+                    file_helper.write_file(&mut compressor, &mut buffer);
+                    decompressed_size
+                },
+            };
+
+            file_helper.seek(SeekFrom::Start(*entry_offset_location as u64));
+            file_helper.write_u32_be((entry_offset - end_of_header) as u32);
+            file_helper.write_u32_be(compressed_size as u32);
+            file_helper.write_u32_be(decompressed_size as u32);
+        }
+        
+        return true;
     }
     
     fn parse_ns2_header(file : &mut FileHelper, offset : u32) -> ArchiveIndex {
@@ -509,12 +628,10 @@ impl Archive {
             ).unwrap();
         } else if matches!(info.compression, Compression::Bzip2) {
             buffer = self.file.read_slice(info.offset, info.size);
-
-            use bzip2_rs::DecoderReader;
             let input = buffer;
 
             // First 4 bytes are the original size, the decoder doesn't need this, so we can skip them.
-            let mut reader = DecoderReader::new(&input[4..]);
+            let mut reader = BzDecoder::new(&input[4..]);
             buffer = Vec::new();
             std::io::copy(&mut reader, &mut buffer).unwrap();
         } else {
