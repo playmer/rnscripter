@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "lib/*",
-    "bin/*", 
+    "bin/rndecode", 
+    "bin/rnencode", 
+    #"bin/rnscripter", 
 ]
 resolver = "2"

@@ -1,5 +1,5 @@
 use core::panic;
-use std::{collections::HashMap, fs::File, io::{ErrorKind, Read, Seek, SeekFrom, Write}};
+use std::{collections::HashMap, fs::File, io::{ErrorKind, Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}};
 
 use crate::image::decode_spb;
 
@@ -29,6 +29,11 @@ impl FileHelper {
 
         buffer
     }
+    
+    fn write_buffer(&mut self, buffer: &[u8]) {
+        self.file.write_all(buffer).unwrap();
+        self.position += buffer.len();
+    }
 
     fn read_u8(&mut self) -> u8 {
         const SIZE : usize = std::mem::size_of::<u8>();
@@ -55,19 +60,19 @@ impl FileHelper {
     }
     
     fn write_u8_be(&mut self, value : u8) {
-        self.file.write_all(&value.to_be_bytes()).unwrap();
+        self.write_buffer(&value.to_be_bytes());
     }
     
     fn write_u16_be(&mut self, value : u16) {
-        self.file.write_all(&value.to_be_bytes()).unwrap();
+        self.write_buffer(&value.to_be_bytes());
     }
     
     fn write_u32_be(&mut self, value : u32) {
-        self.file.write_all(&value.to_be_bytes()).unwrap();
+        self.write_buffer(&value.to_be_bytes());
     }
 
     fn write_u32_le(&mut self, value : u32) {
-        self.file.write_all(&value.to_le_bytes()).unwrap();
+        self.write_buffer(&value.to_le_bytes());
     }
 
     fn read_shiftjis(&mut self) -> String {
@@ -98,8 +103,9 @@ impl FileHelper {
         if errors {
             panic!("Couldn't read a string from this file.");
         }
-        
-        self.file.write_all(res.as_ref()).unwrap();
+
+        self.write_buffer(res.as_ref());
+        self.write_buffer(b"\0");
     }
 
     fn read_quoted_shiftjis(&mut self) -> String {
@@ -128,7 +134,6 @@ impl FileHelper {
 
         res.to_string()
     }
-    
 
     fn write_quoted_shiftjis(&mut self, value : &str) {
         use encoding_rs::SHIFT_JIS;
@@ -137,9 +142,27 @@ impl FileHelper {
             panic!("Couldn't read a string from this file.");
         }
         
-        self.file.write(b"\"").unwrap();
-        self.file.write_all(res.as_ref()).unwrap();
-        self.file.write(b"\"").unwrap();
+        self.write_buffer(b"\"");
+        self.write_buffer(res.as_ref());
+        self.write_buffer(b"\"");
+    }
+
+    fn write_file(&mut self, src: &mut File, buffer: &mut [u8; 64536])
+    {
+        loop {
+            match src.read(buffer) {
+                Ok(size) => {
+                    if size == 0 {
+                        return;
+                    }
+
+                    self.write_buffer(&buffer[0..size]);
+                },
+                Err(err) => {
+                    panic!("Error reading file: {}", err);
+                }
+            }
+        }
     }
 
     fn seek(&mut self, seek : SeekFrom) {
@@ -162,7 +185,7 @@ impl FileHelper {
             *byte = self.key_table[*byte as usize];
         }
 
-        // read_slize alters self.position, don't need to do it redundantly here.
+        // read_slice alters self.position, don't need to do it redundantly here.
 
         output
     }
@@ -299,6 +322,62 @@ impl Archive {
 
         ArchiveIndex{ entries, entries_map, offset : file_offset }
     }
+    
+    pub fn create_sar_archive(file: File, root_dir: &Path, entries : Vec<PathBuf>, offset : u32, key_table : [u8; 256]) -> bool {
+        let mut file_helper = FileHelper {file, key_table, position : 0};
+
+        if (u16::MAX as usize) < entries.len() {
+            return false;
+        }
+
+        let mut entry_offset_locations = Vec::new();
+
+        println!("Entries: {}", entries.len());
+
+        file_helper.write_u16_be(entries.len() as u16);
+        file_helper.write_u32_be(0);
+
+        for entry in &entries {
+            let fullpath = root_dir.join(entry);
+            let mut entry_file = std::fs::File::open(&fullpath).unwrap();
+            let entry_size = entry_file.seek(SeekFrom::End(0)).unwrap();
+            let entry_inner_path = entry.to_str().unwrap();
+
+            file_helper.write_shiftjis(&entry_inner_path);
+
+            // Note down where this offset value is for later.
+            entry_offset_locations.push(file_helper.position);            
+            file_helper.write_u32_be(0);
+            file_helper.write_u32_be(entry_size as u32);
+
+            println!("Entry {}, {}", &entry_inner_path, entry_size);
+        }
+
+        let end_of_header = file_helper.position;
+        println!("End of Header: {end_of_header}");
+
+        file_helper.seek(SeekFrom::Start(2));
+        file_helper.write_u32_be(end_of_header as u32);
+        file_helper.seek(SeekFrom::Start(end_of_header as u64));
+        
+        // We only want to init this once for all files, so the buffer lives outside of the read_file_into_file call.
+        let mut buffer : [u8; 64536] = [0; 64536];
+        
+        for (entry_file_name, entry_offset_location) in entries.iter().zip(&entry_offset_locations) {
+            let fullpath = root_dir.join(&entry_file_name);
+            let mut entry_file = std::fs::File::open(&fullpath).unwrap();
+            let entry_offset = file_helper.position;
+
+            file_helper.seek(SeekFrom::Start(*entry_offset_location as u64));
+            file_helper.write_u32_be((entry_offset - end_of_header) as u32);
+
+            file_helper.seek(SeekFrom::Start(entry_offset as u64));
+            file_helper.write_file(&mut entry_file, &mut buffer);
+        }
+        
+        return true;
+    }
+
 
     fn parse_nsa_header(file : &mut FileHelper, offset : u32) -> ArchiveIndex {
         let mut entries : Vec<ArchiveEntry> = Vec::new();
@@ -370,7 +449,6 @@ impl Archive {
                 Compression::None
             };
             
-
             println!("{name}: {size}: {file_offset}");
             
             entries.push(ArchiveEntry {
@@ -399,7 +477,7 @@ impl Archive {
         }
     }
 
-    pub fn new(file : std::fs::File, archive_type : ArchiveType, offset : u32, key_table : [u8; 256]) -> Archive {
+    pub fn open_file(file : std::fs::File, archive_type : ArchiveType, offset : u32, key_table : [u8; 256]) -> Archive {
         let mut file_helper = FileHelper {file, key_table, position : 0};
         let index = Self::parse_header(&mut file_helper, &archive_type, offset);
 

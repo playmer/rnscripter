@@ -32,7 +32,7 @@ struct Arguments {
 
 fn extract_files(path : &Path, archive_type : ArchiveType, offset : u32, output_dir : &Path, verbose: bool) {
     let file = std::fs::File::open(&path).unwrap();
-    let mut reader : Archive = Archive::new(file, archive_type, offset, nscripter_formats::default_keytable());
+    let mut reader : Archive = Archive::open_file(file, archive_type, offset, nscripter_formats::default_keytable());
 
     for i in 0..reader.index.entries.len() {
         let info = reader.index.entries[i].info();
@@ -85,7 +85,7 @@ fn process_file(path: &Path, arguments : &Arguments) {
     } else if file_name.starts_with("arc") && file_name.ends_with(".sar") {
         ArchiveType::SAR
     } else if file_name.ends_with(".nbz") {
-        let file = std::fs::File::open(&path).unwrap();
+        let file = File::open(&path).unwrap();
         let decoded_data = extract_bz2(file, nscripter_formats::default_keytable());
         let file_ext = detect_file_type(&decoded_data);
         
